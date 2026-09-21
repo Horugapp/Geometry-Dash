@@ -1,599 +1,227 @@
+/* Geometry Dash DS - interfaz azul con iconos, carrusel y personajes */
 #include <nds.h>
 #include <stdio.h>
 #include <string.h>
 
-#define GROUND_Y      160
-#define TILE          16
-#define LEVEL_W       180
-#define LEVEL_H       6
-#define PLAYER_SX     52
-#define PSIZE         16
-#define SPEED         3
-#define JUMP_V        (-1450)
-#define GRAV          121
-#define MAX_FALL      2300
-#define END_X         2360
-#define MAP_COUNT     5
-#define CHAR_COUNT    4
+#define GROUND_Y 160
+#define TILE 16
+#define LEVEL_W 180
+#define LEVEL_H 6
+#define PLAYER_SX 52
+#define PSIZE 16
+#define END_X 2360
+#define MAPS 5
+#define CHARS 4
 
-enum { ST_MENU = 0, ST_PLAY, ST_PAUSED, ST_WIN };
-enum { T_EMPTY = 0, T_BLOCK = 1, T_SPIKE = 2 };
-enum {
-    C_TRANS = 0,
-    C_DARK,
-    C_CYAN,
-    C_LIGHT,
-    C_BLOCK,
-    C_ACCENT,
-    C_SPIKE,
-    C_EDGE,
-    C_PINK,
-    C_YELLOW,
-    C_PURPLE,
-    C_GREEN,
-    C_ORANGE
+enum { MENU, PLAY, PAUSE, WIN };
+enum { EMPTY, BLOCK, SPIKE };
+enum { PAL_CLEAR, PAL_DARK, PAL_BODY, PAL_HIGHLIGHT, PAL_BLOCK, PAL_SPIKE, PAL_EDGE };
+
+typedef struct { const char *name; int theme; int speed; } Map;
+typedef struct { const char *name; u16 body; u16 highlight; } Character;
+
+static const Map maps[MAPS] = {
+    {"NEON", 0, 3}, {"SKY", 1, 3}, {"VOID", 2, 4},
+    {"RIFT", 3, 4}, {"DASH", 4, 5}
+};
+static const Character chars[CHARS] = {
+    {"CUBE", RGB15(0,25,30), RGB15(18,31,31)},
+    {"SHIP", RGB15(28,15,25), RGB15(31,27,31)},
+    {"BALL", RGB15(16,10,31), RGB15(30,30,31)},
+    {"WAVE", RGB15(7,25,13), RGB15(28,31,17)}
 };
 
-typedef struct {
-    const char *name;
-    int theme;
-    int speed;
-} MapDef;
+static u8 level[LEVEL_H][LEVEL_W];
+static int bg, state = MENU, map = 0, character = 0;
+static int playerX, playerY, angle, attempts;
+static s32 fixedY, velocityY;
+static bool grounded;
+static int carouselOffset;
+static u16 *playerGfx, *blockGfx, *spikeGfx;
+static u16 *screenPixels;
 
-typedef struct {
-    const char *name;
-    u16 body;
-    u16 accent;
-} CharacterDef;
-
-static MapDef maps[MAP_COUNT] = {
-    { "NEON", 0, 3 },
-    { "SKY", 1, 3 },
-    { "VOID", 2, 4 },
-    { "RIFT", 3, 4 },
-    { "DASH", 4, 5 }
-};
-
-static CharacterDef characters[CHAR_COUNT] = {
-    { "CUBE", RGB15(0, 25, 30), RGB15(17, 31, 31) },
-    { "SHIP", RGB15(27, 18, 26), RGB15(31, 25, 29) },
-    { "BALL", RGB15(18, 14, 31), RGB15(29, 30, 31) },
-    { "WAVE", RGB15(10, 26, 15), RGB15(28, 31, 16) }
-};
-
-static int bgId;
-static u16 *gfxPlayer, *gfxBlock, *gfxSpike;
-static u16 *topGfx;
-static u8 grid[LEVEL_H][LEVEL_W];
-static int px, py;
-static s32 fy, vy;
-static bool onGround;
-static int rot;
-static int state;
-static int attempts = 0;
-static int mapIndex = 0;
-static int characterIndex = 0;
-static int menuSpin = 0;
-static int startGameTimer = 0;
-
-static void putTile(int c, int r, u8 t) {
-    if (c >= 0 && c < LEVEL_W && r >= 0 && r < LEVEL_H) grid[r][c] = t;
+static void tile(int x, int y, u8 value) {
+    if (x >= 0 && x < LEVEL_W && y >= 0 && y < LEVEL_H) level[y][x] = value;
 }
-
-static void spikes(int c, int n) {
-    for (int i = 0; i < n; i++) putTile(c + i, 0, T_SPIKE);
+static void spikes(int x, int count) { for (int i = 0; i < count; i++) tile(x+i, 0, SPIKE); }
+static void blocks(int x, int y, int w, int h) {
+    for (int j=0; j<h; j++) for (int i=0; i<w; i++) tile(x+i, y+j, BLOCK);
 }
-
-static void blocks(int c, int r, int w, int h) {
-    for (int j = 0; j < h; j++) {
-        for (int i = 0; i < w; i++) putTile(c + i, r + j, T_BLOCK);
+static void buildLevel(int m) {
+    memset(level, 0, sizeof(level));
+    spikes(15+m, 2); blocks(25+m*2,0,1,1); spikes(31+m,1);
+    blocks(42+m*2,0,2,1); spikes(54+m,2); blocks(67+m,0,1,1);
+    spikes(77+m,1); blocks(88+m*2,0,3,1); spikes(102+m,2);
+    blocks(117+m,0,2,1); spikes(131+m,1); blocks(143+m,0,2,1);
+    if (maps[m].speed > 3) {
+        for (int x=12; x<LEVEL_W; x+=25) tile(x, 1, BLOCK);
     }
 }
 
-static void buildLevelForMap(int idx) {
-    memset(grid, 0, sizeof(grid));
-    int m = maps[idx].theme;
-    int s = maps[idx].speed;
-
-    switch (m) {
-        case 0:
-            spikes(15, 2);
-            blocks(24, 0, 1, 1);
-            spikes(28, 1);
-            blocks(36, 0, 2, 1);
-            spikes(47, 2);
-            blocks(57, 0, 1, 1);
-            spikes(66, 1);
-            blocks(78, 0, 3, 1);
-            spikes(88, 2);
-            blocks(98, 0, 2, 1);
-            spikes(110, 1);
-            blocks(120, 0, 2, 1);
-            spikes(133, 2);
-            break;
-        case 1:
-            spikes(18, 1);
-            blocks(28, 0, 2, 1);
-            spikes(35, 2);
-            blocks(46, 0, 3, 1);
-            spikes(58, 1);
-            blocks(70, 0, 1, 1);
-            spikes(79, 2);
-            blocks(91, 0, 2, 1);
-            spikes(100, 1);
-            blocks(112, 0, 4, 1);
-            spikes(124, 1);
-            break;
-        case 2:
-            spikes(14, 2);
-            blocks(28, 0, 1, 1);
-            spikes(35, 1);
-            blocks(45, 0, 3, 1);
-            spikes(56, 2);
-            blocks(69, 0, 2, 1);
-            spikes(82, 1);
-            blocks(92, 0, 4, 1);
-            spikes(103, 2);
-            blocks(116, 0, 1, 1);
-            spikes(124, 1);
-            blocks(138, 0, 2, 1);
-            break;
-        case 3:
-            spikes(20, 1);
-            blocks(30, 0, 2, 1);
-            spikes(42, 2);
-            blocks(55, 0, 2, 1);
-            spikes(67, 1);
-            blocks(76, 0, 3, 1);
-            spikes(92, 2);
-            blocks(105, 0, 2, 1);
-            spikes(120, 1);
-            blocks(129, 0, 4, 1);
-            spikes(146, 1);
-            break;
-        default:
-            spikes(19, 1);
-            blocks(31, 0, 2, 1);
-            spikes(41, 2);
-            blocks(53, 0, 1, 1);
-            spikes(62, 2);
-            blocks(75, 0, 3, 1);
-            spikes(90, 1);
-            blocks(102, 0, 2, 1);
-            spikes(112, 2);
-            blocks(124, 0, 2, 1);
-            spikes(139, 1);
-            break;
-    }
-
-    if (s > 3) {
-        for (int x = 10; x < LEVEL_W; x += 24) {
-            if ((x / 5) % 2 == 0) putTile(x, 1, T_BLOCK);
-        }
-    }
+static void pixel(u8 *data, int x, int y, u8 color) {
+    int t=(y>>3)*2+(x>>3);
+    data[t*64+(y&7)*8+(x&7)] = color;
 }
-
-static void putPix(u8 *buf, int x, int y, u8 c) {
-    int tile = (y >> 3) * 2 + (x >> 3);
-    buf[tile * 64 + (y & 7) * 8 + (x & 7)] = c;
+static void rectangle(u8 *data,int x0,int y0,int x1,int y1,u8 c) {
+    for(int y=y0;y<y1;y++) for(int x=x0;x<x1;x++) pixel(data,x,y,c);
 }
-
-static void rect(u8 *buf, int x0, int y0, int x1, int y1, u8 c) {
-    for (int y = y0; y < y1; y++) {
-        for (int x = x0; x < x1; x++) putPix(buf, x, y, c);
-    }
+static void upload(u16 *destination, const u8 *source) {
+    for(int i=0;i<128;i++) destination[i]=(u16)(source[i*2]|(source[i*2+1]<<8));
 }
-
-static void uploadSprite(u16 *dst, const u8 *src) {
-    for (int i = 0; i < 128; i++) {
-        dst[i] = (u16)(src[2 * i] | (src[2 * i + 1] << 8));
-    }
-}
-
 static void makeSprites(void) {
-    static u8 buf[256];
+    static u8 data[256];
+    memset(data,0,sizeof(data));
+    rectangle(data,0,0,16,16,PAL_DARK);
+    rectangle(data,2,2,14,14,PAL_BODY);
+    rectangle(data,5,5,11,11,PAL_HIGHLIGHT);
+    upload(playerGfx,data);
 
-    memset(buf, 0, sizeof(buf));
-    rect(buf, 0, 0, 16, 16, C_DARK);
-    rect(buf, 2, 2, 14, 14, characters[characterIndex].body);
-    rect(buf, 5, 5, 11, 11, characters[characterIndex].accent);
-    uploadSprite(gfxPlayer, buf);
+    memset(data,0,sizeof(data));
+    rectangle(data,0,0,16,16,PAL_DARK);
+    rectangle(data,1,1,15,15,PAL_BLOCK);
+    rectangle(data,3,3,13,13,PAL_HIGHLIGHT);
+    upload(blockGfx,data);
 
-    memset(buf, 0, sizeof(buf));
-    rect(buf, 0, 0, 16, 16, C_DARK);
-    rect(buf, 1, 1, 15, 15, C_BLOCK);
-    rect(buf, 3, 3, 13, 13, C_ACCENT);
-    rect(buf, 4, 4, 12, 12, C_BLOCK);
-    uploadSprite(gfxBlock, buf);
-
-    memset(buf, 0, sizeof(buf));
-    for (int y = 0; y < 16; y++) {
-        int x0 = 7 - y / 2;
-        int x1 = 8 + y / 2;
-        for (int x = x0; x <= x1; x++) {
-            u8 c = (x == x0 || x == x1 || y == 15) ? C_EDGE : C_SPIKE;
-            putPix(buf, x, y, c);
-        }
+    memset(data,0,sizeof(data));
+    for(int y=0;y<16;y++) {
+        int left=7-y/2, right=8+y/2;
+        for(int x=left;x<=right;x++) pixel(data,x,y,(x==left||x==right||y==15)?PAL_EDGE:PAL_SPIKE);
     }
-    uploadSprite(gfxSpike, buf);
-
-    SPRITE_PALETTE[C_DARK]   = RGB15(1, 1, 4);
-    SPRITE_PALETTE[C_CYAN]   = RGB15(0, 24, 31);
-    SPRITE_PALETTE[C_LIGHT]  = RGB15(20, 31, 31);
-    SPRITE_PALETTE[C_BLOCK]  = RGB15(6, 6, 20);
-    SPRITE_PALETTE[C_ACCENT] = RGB15(12, 14, 31);
-    SPRITE_PALETTE[C_SPIKE]  = RGB15(28, 28, 31);
-    SPRITE_PALETTE[C_EDGE]   = RGB15(2, 2, 6);
-    SPRITE_PALETTE[C_PINK]   = RGB15(31, 12, 31);
-    SPRITE_PALETTE[C_YELLOW] = RGB15(31, 27, 10);
-    SPRITE_PALETTE[C_PURPLE] = RGB15(21, 8, 29);
-    SPRITE_PALETTE[C_GREEN]  = RGB15(11, 27, 16);
-    SPRITE_PALETTE[C_ORANGE] = RGB15(31, 18, 0);
+    upload(spikeGfx,data);
+    SPRITE_PALETTE[PAL_DARK]=RGB15(1,1,4);
+    SPRITE_PALETTE[PAL_BODY]=chars[character].body;
+    SPRITE_PALETTE[PAL_HIGHLIGHT]=chars[character].highlight;
+    SPRITE_PALETTE[PAL_BLOCK]=RGB15(8,8,24);
+    SPRITE_PALETTE[PAL_SPIKE]=RGB15(29,29,31);
+    SPRITE_PALETTE[PAL_EDGE]=RGB15(2,2,6);
 }
 
-static void drawTopBackground(int mapTheme) {
-    topGfx = bgGetGfxPtr(bgId);
-    for (int y = 0; y < 192; y++) {
-        for (int x = 0; x < 256; x++) {
-            int r = 5, g = 12, b = 28;
-            switch (mapTheme) {
-                case 0: r = 7 + (y >> 2); g = 16 + (y >> 2); b = 26 + (x >> 4); break;
-                case 1: r = 7 + (x >> 4); g = 15 + (y >> 3); b = 30; break;
-                case 2: r = 12 + (y >> 3); g = 8 + (x >> 5); b = 18 + (x >> 4); break;
-                case 3: r = 18 + (y >> 3); g = 12 + (x >> 5); b = 20; break;
-                case 4: r = 14 + (x >> 4); g = 10 + (y >> 3); b = 20; break;
-            }
-            if (y >= GROUND_Y) {
-                r = 3; g = 4; b = 10;
-                if ((x & 15) == 0) { r = 6; g = 8; b = 16; }
-            }
-            if ((x % 32 == 0) || (y % 32 == 0)) {
-                r += 2; g += 1; b += 2;
-            }
-            topGfx[y * 256 + x] = RGB15(r, g, b) | BIT(15);
-        }
+static void paintBackground(int theme) {
+    screenPixels=bgGetGfxPtr(bg);
+    for(int y=0;y<192;y++) for(int x=0;x<256;x++) {
+        int r=5,g=12,b=27;
+        if(theme==0){r=5+y/5;g=13+y/6;b=27+x/18;}
+        if(theme==1){r=4+x/18;g=14+y/5;b=31;}
+        if(theme==2){r=11+y/8;g=5+x/30;b=17+x/16;}
+        if(theme==3){r=18+y/8;g=8+x/30;b=22;}
+        if(theme==4){r=15+x/18;g=8+y/6;b=22;}
+        if(y>=GROUND_Y){r=3;g=4;b=10;if((x&15)==0){r=6;g=8;b=16;}}
+        if((x&31)==0||(y&31)==0){r+=2;g+=2;b+=2;}
+        screenPixels[y*256+x]=RGB15(r,g,b)|BIT(15);
     }
 }
 
-static void drawGlyphBig(int x, int y, char ch, u16 color) {
-    static const unsigned char fontA[7] = { 0x7E, 0x11, 0x11, 0x7E, 0x00, 0x00, 0x00 };
-    static const unsigned char fontD[7] = { 0x7F, 0x49, 0x49, 0x36, 0x00, 0x00, 0x00 };
-    static const unsigned char fontE[7] = { 0x7F, 0x49, 0x49, 0x41, 0x00, 0x00, 0x00 };
-    static const unsigned char fontF[7] = { 0x7F, 0x09, 0x09, 0x01, 0x00, 0x00, 0x00 };
-    static const unsigned char fontG[7] = { 0x3E, 0x41, 0x49, 0x49, 0x3A, 0x00, 0x00 };
-    static const unsigned char fontH[7] = { 0x7F, 0x08, 0x08, 0x7F, 0x00, 0x00, 0x00 };
-    static const unsigned char fontI[7] = { 0x00, 0x41, 0x7F, 0x41, 0x00, 0x00, 0x00 };
-    static const unsigned char fontK[7] = { 0x7F, 0x08, 0x14, 0x22, 0x00, 0x00, 0x00 };
-    static const unsigned char fontM[7] = { 0x7F, 0x02, 0x04, 0x02, 0x7F, 0x00, 0x00 };
-    static const unsigned char fontN[7] = { 0x7F, 0x04, 0x08, 0x10, 0x7F, 0x00, 0x00 };
-    static const unsigned char fontO[7] = { 0x3E, 0x41, 0x41, 0x3E, 0x00, 0x00, 0x00 };
-    static const unsigned char fontR[7] = { 0x7F, 0x09, 0x19, 0x66, 0x00, 0x00, 0x00 };
-    static const unsigned char fontS[7] = { 0x46, 0x49, 0x49, 0x31, 0x00, 0x00, 0x00 };
-    static const unsigned char fontT[7] = { 0x01, 0x01, 0x7F, 0x01, 0x01, 0x00, 0x00 };
-    static const unsigned char fontY[7] = { 0x01, 0x1F, 0x60, 0x80, 0x00, 0x00, 0x00 };
-    static const unsigned char fontV[7] = { 0x3F, 0x40, 0x40, 0x3F, 0x00, 0x00, 0x00 };
-    static const unsigned char fontSpace[7] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-    static const unsigned char fontDash[7] = { 0x00, 0x00, 0x7F, 0x00, 0x00, 0x00, 0x00 };
-
-    const unsigned char *data = fontSpace;
-    switch (ch) {
-        case 'A': data = fontA; break;
-        case 'D': data = fontD; break;
-        case 'E': data = fontE; break;
-        case 'F': data = fontF; break;
-        case 'G': data = fontG; break;
-        case 'H': data = fontH; break;
-        case 'I': data = fontI; break;
-        case 'K': data = fontK; break;
-        case 'M': data = fontM; break;
-        case 'N': data = fontN; break;
-        case 'O': data = fontO; break;
-        case 'R': data = fontR; break;
-        case 'S': data = fontS; break;
-        case 'T': data = fontT; break;
-        case 'V': data = fontV; break;
-        case 'Y': data = fontY; break;
-        case ' ': data = fontSpace; break;
-        case '-': data = fontDash; break;
-        default: return;
-    }
-
-    for (int yy = 0; yy < 7; yy++) {
-        for (int xx = 0; xx < 5; xx++) {
-            if ((data[yy] >> (4 - xx)) & 1) {
-                int px = x + xx * 2;
-                int py = y + yy * 2;
-                if (px >= 0 && px < 256 && py >= 0 && py < 160) {
-                    topGfx[py * 256 + px] = color;
-                    topGfx[(py + 1) * 256 + px] = color;
-                    topGfx[py * 256 + px + 1] = color;
-                    topGfx[(py + 1) * 256 + px + 1] = color;
-                }
-            }
-        }
+/* Pixel title and map name on the top screen. */
+static void glyph(int x,int y,char c,u16 color) {
+    static const u8 letters[26][5] = {
+        {31,5,5,31,0},{30,17,17,14,0},{14,17,17,10,0},{31,17,17,14,0},
+        {31,21,21,17,0},{31,5,5,1,0},{14,17,21,26,0},{31,4,4,31,0},
+        {0,17,31,17,0},{8,16,16,15,0},{31,4,10,17,0},{31,16,16,16,0},
+        {31,2,4,2,31},{31,2,4,8,31},{14,17,17,14,0},{31,5,5,2,0},
+        {14,17,25,30,0},{31,5,13,18,0},{18,21,21,9,0},{1,1,31,1,1},
+        {15,16,16,15,0},{7,8,16,8,7},{31,8,4,8,31},{17,10,4,10,17},
+        {1,2,28,2,1},{25,21,19,17,0}
+    };
+    if(c<'A'||c>'Z') return;
+    for(int yy=0;yy<5;yy++) for(int xx=0;xx<5;xx++) if(letters[c-'A'][yy]&(1<<(4-xx))) {
+        int px=x+xx*2, py=y+yy*2;
+        if(px<256&&py<192){screenPixels[py*256+px]=color;screenPixels[py*256+px+1]=color;screenPixels[(py+1)*256+px]=color;screenPixels[(py+1)*256+px+1]=color;}
     }
 }
-
-static void drawTitleLine(const char *text, int x, int y) {
-    int dx = x;
-    for (const char *c = text; *c; c++) {
-        drawGlyphBig(dx, y, *c, RGB15(0, 31, 15));
-        dx += 14;
-    }
+static void text(int x,int y,const char *s,u16 color) { while(*s){glyph(x,y,*s++,color);x+=13;} }
+static void drawTopUi(void) {
+    u16 green=RGB15(12,31,9), glow=RGB15(2,18,7);
+    text(13,10,"GEOMETRY",glow); text(11,8,"GEOMETRY",green);
+    text(112,40,"DASH",glow); text(110,38,"DASH",green);
+    text(82,120,maps[map].name,RGB15(0,31,20));
 }
 
-static void drawMapBanner(const char *text) {
-    drawTitleLine("GEOMETRY", 14, 12);
-    drawTitleLine("DASH", 112, 52);
-    int x = 22;
-    int y = 136;
-    for (const char *c = text; *c; c++) {
-        drawGlyphBig(x, y, *c, RGB15(0, 31, 19));
-        x += 10;
-    }
-}
-
-static void drawHudBottom(void) {
+/* The lower screen is deliberately icon-like: cards, arrows, character and controls. */
+static void drawBottomUi(void) {
     consoleClear();
-    printf("\x1b[1;2HGEOMETRY DASH\n");
-    printf("MAP: %s\n", maps[mapIndex].name);
-    printf("CHAR: %s\n", characters[characterIndex].name);
-    printf("A = PLAY  START = PAUSE\n");
-    printf("L/R = MAP  U/D = CHAR\n");
-    printf("ATTEMPTS: %d\n", attempts);
+    int previous=(map+MAPS-1)%MAPS, next=(map+1)%MAPS;
+    printf("\x1b[1;1H   [GEOMETRY DASH DS]");
+    printf("\x1b[3;1H      <  [ %s ]  >", maps[map].name);
+    printf("\x1b[5;1H     %s       %s", maps[previous].name, maps[next].name);
+    printf("\x1b[7;1H   [A] PLAY     [START] PAUSE");
+    printf("\x1b[9;1H   [L/R] MAP   [UP/DOWN] CHARACTER");
+    printf("\x1b[11;1H   CHARACTER: [ %s ]", chars[character].name);
+    printf("\x1b[13;1H   MUSIC: ON    ATTEMPTS: %d", attempts);
+    printf("\x1b[15;1H   ◄      ◉ PLAY      ►");
 }
 
 static void resetPlayer(void) {
-    px = PLAYER_SX;
-    py = GROUND_Y - PSIZE;
-    fy = py << 8;
-    vy = 0;
-    onGround = true;
-    rot = 0;
-    state = ST_MENU;
-    attempts++;
-    drawHudBottom();
+    playerX=PLAYER_SX; playerY=GROUND_Y-PSIZE; fixedY=playerY<<8;
+    velocityY=0; grounded=true; angle=0; state=MENU; attempts++;
+    drawBottomUi();
 }
-
-static void startRun(void) {
-    buildLevelForMap(mapIndex);
-    px = PLAYER_SX;
-    py = GROUND_Y - PSIZE;
-    fy = py << 8;
-    vy = 0;
-    onGround = true;
-    rot = 0;
-    state = ST_PLAY;
-    startGameTimer = 30;
+static void startLevel(void) {
+    buildLevel(map); playerX=PLAYER_SX; playerY=GROUND_Y-PSIZE;
+    fixedY=playerY<<8; velocityY=0; grounded=true; angle=0; state=PLAY;
 }
-
-static void die(void) {
-    state = ST_PAUSED;
-}
-
-static void updatePlay(void) {
-    u32 held = keysHeld();
-    bool press = (held & (KEY_A | KEY_B | KEY_UP | KEY_L | KEY_R | KEY_TOUCH)) != 0;
-
-    if (onGround && press) {
-        vy = JUMP_V;
-        onGround = false;
-    }
-
-    int prevBottom = py + PSIZE;
-    vy += GRAV;
-    if (vy > MAX_FALL) vy = MAX_FALL;
-    fy += vy;
-    px += maps[mapIndex].speed + 1;
-    py = fy >> 8;
-    onGround = false;
-
-    if (py + PSIZE >= GROUND_Y) {
-        py = GROUND_Y - PSIZE;
-        fy = py << 8;
-        vy = 0;
-        onGround = true;
-    }
-
-    int c0 = px >> 4;
-    int c1 = (px + PSIZE - 1) >> 4;
-    for (int c = c0; c <= c1; c++) {
-        if (c < 0 || c >= LEVEL_W) continue;
-        for (int r = 0; r < LEVEL_H; r++) {
-            u8 t = grid[r][c];
-            if (t == T_EMPTY) continue;
-
-            int bx = c * TILE;
-            int by = GROUND_Y - (r + 1) * TILE;
-
-            if (t == T_BLOCK) {
-                if (px + PSIZE > bx && px < bx + TILE &&
-                    py + PSIZE > by && py < by + TILE) {
-                    int pen = py + PSIZE - by;
-                    if (vy >= 0 && (prevBottom <= by || pen <= 4)) {
-                        py = by - PSIZE;
-                        fy = py << 8;
-                        vy = 0;
-                        onGround = true;
-                    } else {
-                        die();
-                        return;
-                    }
-                }
-            } else {
-                if (px + PSIZE - 2 > bx + 4 && px + 2 < bx + 12 &&
-                    py + PSIZE - 2 > by + 6 && py + 2 < by + TILE) {
-                    die();
-                    return;
-                }
-            }
+static void dead(void) { state=PAUSE; }
+static void updateGame(void) {
+    u32 held=keysHeld();
+    if(grounded&&(held&(KEY_A|KEY_B|KEY_UP|KEY_TOUCH))){velocityY=-1450;grounded=false;}
+    int oldBottom=playerY+PSIZE;
+    velocityY+=121;if(velocityY>2300)velocityY=2300;
+    fixedY+=velocityY;playerX+=maps[map].speed+1;playerY=fixedY>>8;grounded=false;
+    if(playerY+PSIZE>=GROUND_Y){playerY=GROUND_Y-PSIZE;fixedY=playerY<<8;velocityY=0;grounded=true;}
+    for(int x=playerX>>4;x<=(playerX+PSIZE-1>>4);x++) for(int y=0;y<LEVEL_H;y++) {
+        if(x<0||x>=LEVEL_W||!level[y][x])continue;
+        int bx=x*TILE,by=GROUND_Y-(y+1)*TILE;
+        if(level[y][x]==SPIKE){if(playerX+14>bx+4&&playerX+2<bx+12&&playerY+14>by+6){dead();return;}}
+        else if(playerX+PSIZE>bx&&playerX<bx+TILE&&playerY+PSIZE>by&&playerY<by+TILE){
+            if(velocityY>=0&&(oldBottom<=by||playerY+PSIZE-by<=4)){playerY=by-PSIZE;fixedY=playerY<<8;velocityY=0;grounded=true;}else{dead();return;}
         }
     }
-
-    if (onGround) {
-        rot = ((rot + 45) / 90) * 90;
-        rot %= 360;
-    } else {
-        rot += 4;
-        if (rot >= 360) rot -= 360;
-    }
-
-    if (px >= END_X) {
-        state = ST_WIN;
-    }
+    if(grounded)angle=((angle+45)/90*90)%360;else if((angle+=4)>=360)angle-=360;
+    if(playerX>=END_X)state=WIN;
 }
-
-static void hideSprite(int id) {
-    oamSet(&oamMain, id, 0, 0, 0, 0, SpriteSize_16x16, SpriteColorFormat_256Color,
-           gfxBlock, -1, false, true, false, false, false);
-}
-
+static void hide(int id){oamSet(&oamMain,id,0,0,0,0,SpriteSize_16x16,SpriteColorFormat_256Color,blockGfx,-1,false,true,false,false,false);}
 static void renderGame(void) {
-    int cam = px - PLAYER_SX;
-    int id = 1;
-
-    int c0 = cam >> 4;
-    for (int c = c0; c <= c0 + 18; c++) {
-        if (c < 0 || c >= LEVEL_W) continue;
-        for (int r = 0; r < LEVEL_H; r++) {
-            u8 t = grid[r][c];
-            if (t == T_EMPTY || id >= 127) continue;
-            int sx = c * TILE - cam;
-            int sy = GROUND_Y - (r + 1) * TILE;
-            oamSet(&oamMain, id++, sx, sy, 1, 0, SpriteSize_16x16,
-                   SpriteColorFormat_256Color,
-                   (t == T_BLOCK) ? gfxBlock : gfxSpike,
-                   -1, false, false, false, false, false);
-        }
+    int camera=playerX-PLAYER_SX,id=1;
+    for(int x=camera>>4;x<= (camera>>4)+18;x++) for(int y=0;y<LEVEL_H;y++) if(x>=0&&x<LEVEL_W&&level[y][x]&&id<127){
+        oamSet(&oamMain,id++,x*TILE-camera,GROUND_Y-(y+1)*TILE,1,0,SpriteSize_16x16,SpriteColorFormat_256Color,level[y][x]==BLOCK?blockGfx:spikeGfx,-1,false,false,false,false,false);
     }
-    for (; id < 128; id++) hideSprite(id);
-
-    if (state != ST_PAUSED) {
-        oamRotateScale(&oamMain, 0, (rot * 32768) / 360, 256, 256);
-        oamSet(&oamMain, 0, PLAYER_SX - 8, py - 8, 0, 0, SpriteSize_16x16,
-               SpriteColorFormat_256Color, gfxPlayer, 0, true, false, false, false, false);
-    } else {
-        hideSprite(0);
-    }
-
-    bgSetScroll(bgId, cam & 255, 0);
-    drawMapBanner(maps[mapIndex].name);
-}
-
-static void handleMenuInput(void) {
-    u32 down = keysDown();
-    if (down & KEY_LEFT) {
-        mapIndex = (mapIndex + MAP_COUNT - 1) % MAP_COUNT;
-        menuSpin = 24;
-    }
-    if (down & KEY_RIGHT) {
-        mapIndex = (mapIndex + 1) % MAP_COUNT;
-        menuSpin = -24;
-    }
-    if (down & KEY_UP) {
-        characterIndex = (characterIndex + CHAR_COUNT - 1) % CHAR_COUNT;
-        makeSprites();
-    }
-    if (down & KEY_DOWN) {
-        characterIndex = (characterIndex + 1) % CHAR_COUNT;
-        makeSprites();
-    }
-    if (down & KEY_A) {
-        startRun();
-    }
-    if (down & KEY_START) {
-        state = ST_PAUSED;
-    }
-}
-
-static void handleInGameInput(void) {
-    u32 down = keysDown();
-    if (down & KEY_START) {
-        state = ST_PAUSED;
-        return;
-    }
-    if (down & (KEY_A | KEY_B | KEY_UP | KEY_L | KEY_R | KEY_TOUCH)) {
-        if (onGround) {
-            vy = JUMP_V;
-            onGround = false;
-        }
-    }
-    if (down & KEY_SELECT) {
-        state = ST_MENU;
-        drawHudBottom();
-    }
+    while(id<128)hide(id++);
+    if(state!=PAUSE){oamRotateScale(&oamMain,0,(angle*32768)/360,256,256);oamSet(&oamMain,0,PLAYER_SX-8,playerY-8,0,0,SpriteSize_16x16,SpriteColorFormat_256Color,playerGfx,0,true,false,false,false,false);}else hide(0);
+    bgSetScroll(bg,camera&255,0);drawTopUi();
 }
 
 int main(void) {
-    videoSetMode(MODE_5_2D | DISPLAY_BG3_ACTIVE | DISPLAY_SPR_ACTIVE);
-    vramSetBankA(VRAM_A_MAIN_BG);
-    vramSetBankB(VRAM_B_MAIN_SPRITE);
-    consoleDemoInit();
-
-    bgId = bgInit(3, BgType_Bmp16, BgSize_B16_256x256, 0, 0);
-    drawTopBackground(maps[mapIndex].theme);
-
-    oamInit(&oamMain, SpriteMapping_1D_32, false);
-    gfxPlayer = oamAllocateGfx(&oamMain, SpriteSize_16x16, SpriteColorFormat_256Color);
-    gfxBlock  = oamAllocateGfx(&oamMain, SpriteSize_16x16, SpriteColorFormat_256Color);
-    gfxSpike  = oamAllocateGfx(&oamMain, SpriteSize_16x16, SpriteColorFormat_256Color);
-    makeSprites();
-
-    buildLevelForMap(mapIndex);
-    resetPlayer();
-    drawHudBottom();
-
-    while (1) {
-        scanKeys();
-        u32 down = keysDown();
-
-        if (state == ST_MENU) {
-            handleMenuInput();
-            drawTopBackground(maps[mapIndex].theme);
-            drawMapBanner(maps[mapIndex].name);
-            drawHudBottom();
-        } else if (state == ST_PLAY) {
-            handleInGameInput();
-            updatePlay();
-            renderGame();
-        } else if (state == ST_PAUSED) {
-            if (down & KEY_A) {
-                startRun();
-            }
-            if (down & KEY_SELECT) {
-                state = ST_MENU;
-                drawHudBottom();
-            }
-            if (down & KEY_LEFT) {
-                mapIndex = (mapIndex + MAP_COUNT - 1) % MAP_COUNT;
-                buildLevelForMap(mapIndex);
-            }
-            if (down & KEY_RIGHT) {
-                mapIndex = (mapIndex + 1) % MAP_COUNT;
-                buildLevelForMap(mapIndex);
-            }
-            drawTopBackground(maps[mapIndex].theme);
-            drawMapBanner(maps[mapIndex].name);
-            drawHudBottom();
-        } else if (state == ST_WIN) {
-            if (down & (KEY_A | KEY_B | KEY_START)) {
-                state = ST_MENU;
-                drawHudBottom();
-            }
-            drawTopBackground(maps[mapIndex].theme);
-            drawMapBanner(maps[mapIndex].name);
+    videoSetMode(MODE_5_2D|DISPLAY_BG3_ACTIVE|DISPLAY_SPR_ACTIVE);
+    vramSetBankA(VRAM_A_MAIN_BG);vramSetBankB(VRAM_B_MAIN_SPRITE);consoleDemoInit();
+    bg=bgInit(3,BgType_Bmp16,BgSize_B16_256x256,0,0);paintBackground(maps[map].theme);
+    oamInit(&oamMain,SpriteMapping_1D_32,false);
+    playerGfx=oamAllocateGfx(&oamMain,SpriteSize_16x16,SpriteColorFormat_256Color);
+    blockGfx=oamAllocateGfx(&oamMain,SpriteSize_16x16,SpriteColorFormat_256Color);
+    spikeGfx=oamAllocateGfx(&oamMain,SpriteSize_16x16,SpriteColorFormat_256Color);
+    makeSprites();buildLevel(map);resetPlayer();
+    while(1){
+        scanKeys();u32 down=keysDown();
+        if(state==MENU){
+            if(down&KEY_LEFT){map=(map+MAPS-1)%MAPS;carouselOffset=-1;}
+            if(down&KEY_RIGHT){map=(map+1)%MAPS;carouselOffset=1;}
+            if(down&KEY_UP){character=(character+CHARS-1)%CHARS;makeSprites();}
+            if(down&KEY_DOWN){character=(character+1)%CHARS;makeSprites();}
+            if(down&KEY_A)startLevel();
+            paintBackground(maps[map].theme);drawTopUi();drawBottomUi();
+        } else if(state==PLAY){
+            if(down&KEY_START){state=PAUSE;drawBottomUi();}
+            else {updateGame();renderGame();}
+        } else if(state==PAUSE){
+            if(down&KEY_A)startLevel();
+            if(down&KEY_SELECT){state=MENU;drawBottomUi();}
+            if(down&KEY_LEFT){map=(map+MAPS-1)%MAPS;buildLevel(map);}
+            if(down&KEY_RIGHT){map=(map+1)%MAPS;buildLevel(map);}
+            drawBottomUi();
+        } else if(state==WIN){
+            if(down&(KEY_A|KEY_B|KEY_START)){state=MENU;drawBottomUi();}
+            drawTopUi();
         }
-
-        if (menuSpin != 0) {
-            menuSpin += (menuSpin > 0) ? -2 : 2;
-        }
-
-        if (startGameTimer > 0) startGameTimer--;
-
-        swiWaitForVBlank();
-        oamUpdate(&oamMain);
-        bgUpdate();
+        if(carouselOffset){carouselOffset+=(carouselOffset>0)?-1:1;}
+        swiWaitForVBlank();oamUpdate(&oamMain);bgUpdate();
     }
-
     return 0;
 }
